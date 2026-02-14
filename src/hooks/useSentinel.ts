@@ -1,7 +1,7 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
-import { DashboardState } from "@/lib/types";
+import { useState, useEffect, useCallback, useRef } from "react";
+import { DashboardState, OrderbookSnapshot } from "@/lib/types";
 import {
   generateOrderbookSnapshot,
   generateHistoricalPSI,
@@ -19,14 +19,40 @@ import { spreadPercent, pegDeviation } from "@/lib/tempo-math";
 
 const REFRESH_INTERVAL = 3000; // 3 seconds
 
+type DataSource = "live" | "mock";
+
 export function useSentinel() {
   const [dashboard, setDashboard] = useState<DashboardState | null>(null);
   const [historicalPSI, setHistoricalPSI] = useState<{ time: number; value: number }[]>([]);
   const [historicalSpread, setHistoricalSpread] = useState<{ time: number; value: number }[]>([]);
   const [isLive, setIsLive] = useState(true);
+  const [dataSource, setDataSource] = useState<DataSource>("live");
+  const [connectionStatus, setConnectionStatus] = useState<"connecting" | "connected" | "fallback">("connecting");
+  const failCountRef = useRef(0);
 
-  const refresh = useCallback(() => {
-    const orderbook = generateOrderbookSnapshot();
+  // Fetch live data from API route
+  const fetchLiveData = useCallback(async (): Promise<OrderbookSnapshot | null> => {
+    try {
+      const res = await fetch("/api/orderbook");
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const json = await res.json();
+      if (json.source === "error") throw new Error(json.message);
+      failCountRef.current = 0;
+      setConnectionStatus("connected");
+      return json.data as OrderbookSnapshot;
+    } catch {
+      failCountRef.current++;
+      // Fall back to mock after 3 consecutive failures
+      if (failCountRef.current >= 3) {
+        setDataSource("mock");
+        setConnectionStatus("fallback");
+      }
+      return null;
+    }
+  }, []);
+
+  // Process an orderbook snapshot through the metrics engine
+  const processSnapshot = useCallback((orderbook: OrderbookSnapshot) => {
     const psi = calculatePSI(orderbook);
     const cliffs = detectLiquidityCliffs(orderbook);
     const whaleWalls = detectWhaleWalls(orderbook);
@@ -67,7 +93,7 @@ export function useSentinel() {
     // Append to historical
     setHistoricalPSI((prev) => {
       const next = [...prev, { time: Date.now(), value: psi.value }];
-      return next.slice(-120); // Keep last 120 points
+      return next.slice(-120);
     });
     setHistoricalSpread((prev) => {
       const next = [...prev, { time: Date.now(), value: spread }];
@@ -75,7 +101,21 @@ export function useSentinel() {
     });
   }, []);
 
-  // Initialize with historical data
+  // Main refresh function
+  const refresh = useCallback(async () => {
+    if (dataSource === "live") {
+      const liveData = await fetchLiveData();
+      if (liveData) {
+        processSnapshot(liveData);
+        return;
+      }
+    }
+    // Fallback to mock
+    const mockData = generateOrderbookSnapshot();
+    processSnapshot(mockData);
+  }, [dataSource, fetchLiveData, processSnapshot]);
+
+  // Initialize
   useEffect(() => {
     setHistoricalPSI(generateHistoricalPSI(60));
     setHistoricalSpread(generateHistoricalSpread(60));
@@ -89,6 +129,20 @@ export function useSentinel() {
     return () => clearInterval(interval);
   }, [isLive, refresh]);
 
+  // Toggle data source
+  const toggleDataSource = useCallback(() => {
+    setDataSource((prev) => {
+      const next = prev === "live" ? "mock" : "live";
+      if (next === "live") {
+        failCountRef.current = 0;
+        setConnectionStatus("connecting");
+      } else {
+        setConnectionStatus("fallback");
+      }
+      return next;
+    });
+  }, []);
+
   return {
     dashboard,
     historicalPSI,
@@ -96,5 +150,8 @@ export function useSentinel() {
     isLive,
     setIsLive,
     refresh,
+    dataSource,
+    connectionStatus,
+    toggleDataSource,
   };
 }

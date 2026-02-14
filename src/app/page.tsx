@@ -11,14 +11,29 @@ import { SpreadChart } from "@/components/SpreadChart";
 import { WhaleWallPanel } from "@/components/WhaleWallPanel";
 
 export default function Dashboard() {
-  const { dashboard, historicalPSI, historicalSpread, isLive, setIsLive, refresh } = useSentinel();
+  const {
+    dashboard,
+    historicalPSI,
+    historicalSpread,
+    isLive,
+    setIsLive,
+    refresh,
+    dataSource,
+    connectionStatus,
+    toggleDataSource,
+  } = useSentinel();
 
   if (!dashboard) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-[#010409]">
         <div className="text-center">
           <div className="text-4xl mb-4 animate-pulse">◎</div>
-          <div className="text-sm text-[#8b949e]">Initializing Sentinel...</div>
+          <div className="text-sm text-[#8b949e]">
+            Connecting to Tempo Moderato...
+          </div>
+          <div className="text-xs text-[#484f58] mt-2">
+            Fetching live orderbook data
+          </div>
         </div>
       </div>
     );
@@ -49,8 +64,37 @@ export default function Dashboard() {
               </div>
             </div>
 
-            <div className="flex items-center gap-4">
-              {/* Live indicator */}
+            <div className="flex items-center gap-3">
+              {/* Data source badge */}
+              <button
+                onClick={toggleDataSource}
+                className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border transition-all ${
+                  dataSource === "live"
+                    ? connectionStatus === "connected"
+                      ? "border-cyan-500/30 bg-cyan-500/10 text-cyan-400"
+                      : "border-yellow-500/30 bg-yellow-500/10 text-yellow-400"
+                    : "border-[#30363d] bg-[#161b22] text-[#8b949e]"
+                }`}
+                title={
+                  dataSource === "live"
+                    ? "Connected to Tempo Moderato RPC. Click to switch to mock data."
+                    : "Using simulated data. Click to connect to live Tempo chain."
+                }
+              >
+                {dataSource === "live" ? (
+                  <>
+                    <span className="w-1.5 h-1.5 rounded-full bg-cyan-400" />
+                    CHAIN
+                  </>
+                ) : (
+                  <>
+                    <span className="w-1.5 h-1.5 rounded-full bg-[#484f58]" />
+                    MOCK
+                  </>
+                )}
+              </button>
+
+              {/* Live/Paused toggle */}
               <button
                 onClick={() => setIsLive(!isLive)}
                 className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium border transition-all ${
@@ -80,9 +124,14 @@ export default function Dashboard() {
                 Refresh
               </button>
 
-              {/* Timestamp */}
-              <div className="hidden md:block text-xs text-[#484f58] font-mono">
-                {new Date(dashboard.orderbook.timestamp).toLocaleTimeString()}
+              {/* Pair + Timestamp */}
+              <div className="hidden lg:flex items-center gap-3">
+                <span className="text-xs font-mono text-[#58a6ff] bg-[#161b22] px-2 py-1 rounded border border-[#1e2733]">
+                  AlphaUSD / pathUSD
+                </span>
+                <span className="text-xs text-[#484f58] font-mono">
+                  {new Date(dashboard.orderbook.timestamp).toLocaleTimeString()}
+                </span>
               </div>
             </div>
           </div>
@@ -117,16 +166,23 @@ export default function Dashboard() {
 
         {/* Footer */}
         <footer className="border-t border-[#1e2733] pt-6 pb-8">
-          <div className="flex items-center justify-between text-xs text-[#484f58]">
+          <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-2 text-xs text-[#484f58]">
             <div>
               Tempo Sentinel — Real-time peg stability monitoring for the Tempo
               DEX ecosystem.
             </div>
             <div className="flex items-center gap-4">
-              <span>Data refresh: 3s</span>
+              <span>
+                Source:{" "}
+                {dataSource === "live"
+                  ? "Tempo Moderato (rpc.moderato.tempo.xyz)"
+                  : "Simulated Data"}
+              </span>
+              <span>•</span>
+              <span>Refresh: 3s</span>
               <span>•</span>
               <span>
-                Metrics: PSI, Cliff Detection, Whale Walls, Flip Analysis
+                Pair: AlphaUSD/pathUSD
               </span>
             </div>
           </div>
