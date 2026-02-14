@@ -261,10 +261,10 @@ export default function Dashboard() {
               <span>Refresh: 3s</span>
               <span>•</span>
               <span>Pair: {selectedPair.label}</span>
-              <span>•</span>
+              {/* <span>•</span>
               <span>
                 Features: PSI, HHI, Cliffs, Whales, Flips, Forecast, Export
-              </span>
+              </span> */}
             </div>
           </div>
         </footer>
