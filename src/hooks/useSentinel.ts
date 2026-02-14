@@ -39,8 +39,9 @@ export function useSentinel() {
   const [connectionStatus, setConnectionStatus] = useState<
     "connecting" | "connected" | "fallback"
   >("connecting");
-  const [selectedPair, setSelectedPair] = useState<TempoPair>(KNOWN_PAIRS[0]);
+  const [selectedPair, setSelectedPairRaw] = useState<TempoPair>(KNOWN_PAIRS[0]);
   const [thresholds, setThresholds] = useState<AlertThresholds>(DEFAULT_THRESHOLDS);
+  const [isSwitchingPair, setIsSwitchingPair] = useState(false);
   const failCountRef = useRef(0);
 
   // Load thresholds from localStorage
@@ -110,7 +111,7 @@ export function useSentinel() {
   // Process a snapshot
   const processSnapshot = useCallback(
     (orderbook: OrderbookSnapshot) => {
-      const psi = calculatePSI(orderbook);
+      const psi = calculatePSI(orderbook, selectedPair.id);
       const cliffs = detectLiquidityCliffs(
         orderbook,
         thresholds.cliffDropPercent / 100
@@ -197,12 +198,21 @@ export function useSentinel() {
       const liveData = await fetchLiveData();
       if (liveData) {
         processSnapshot(liveData);
+        setIsSwitchingPair(false);
         return;
       }
     }
     const mockData = generateOrderbookSnapshot();
     processSnapshot(mockData);
+    setIsSwitchingPair(false);
   }, [dataSource, fetchLiveData, processSnapshot]);
+
+  // Wrap setSelectedPair — only show banner when switching to a different pair
+  const setSelectedPair = useCallback((pair: TempoPair) => {
+    if (pair.id === selectedPair.id) return;
+    setIsSwitchingPair(true);
+    setSelectedPairRaw(pair);
+  }, [selectedPair.id]);
 
   // Initialize
   useEffect(() => {
@@ -251,6 +261,7 @@ export function useSentinel() {
     historicalSpread,
     isLive,
     setIsLive,
+    isSwitchingPair,
     refresh,
     dataSource,
     connectionStatus,

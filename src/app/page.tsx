@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useSentinel } from "@/hooks/useSentinel";
 import { PSIGauge } from "@/components/PSIGauge";
 import { LiquidityHeatmap } from "@/components/LiquidityHeatmap";
@@ -21,6 +21,7 @@ export default function Dashboard() {
     historicalSpread,
     isLive,
     setIsLive,
+    isSwitchingPair,
     refresh,
     dataSource,
     connectionStatus,
@@ -35,6 +36,19 @@ export default function Dashboard() {
 
   const [showSettings, setShowSettings] = useState(false);
   const [showPairDropdown, setShowPairDropdown] = useState(false);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+
+  // Close dropdown on outside click
+  useEffect(() => {
+    if (!showPairDropdown) return;
+    const handler = (e: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
+        setShowPairDropdown(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [showPairDropdown]);
 
   if (!dashboard) {
     return (
@@ -79,7 +93,7 @@ export default function Dashboard() {
               </div>
 
               {/* Pair Selector */}
-              <div className="relative">
+              <div className="relative" ref={dropdownRef}>
                 <button
                   onClick={() => setShowPairDropdown(!showPairDropdown)}
                   className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-mono border border-[#30363d] bg-[#161b22] hover:bg-[#1e2733] text-[#e6edf3] transition-all"
@@ -200,6 +214,21 @@ export default function Dashboard() {
         </div>
       </header>
 
+      {/* Updating indicator — only when switching pairs */}
+      {isSwitchingPair && (
+        <div className="border-b border-[#1e2733] bg-[#161b22]">
+          <div className="max-w-[1600px] mx-auto px-6 py-2 flex items-center gap-3">
+            <span className="relative flex h-2 w-2">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#58a6ff] opacity-75" />
+              <span className="relative inline-flex rounded-full h-2 w-2 bg-[#58a6ff]" />
+            </span>
+            <span className="text-xs text-[#8b949e]">
+              Updating {selectedPair.label} orderbook...
+            </span>
+          </div>
+        </div>
+      )}
+
       {/* Main content */}
       <main className="max-w-[1600px] mx-auto px-6 py-6 space-y-6">
         {/* Row 1: Metric cards */}
@@ -261,10 +290,6 @@ export default function Dashboard() {
               <span>Refresh: 3s</span>
               <span>•</span>
               <span>Pair: {selectedPair.label}</span>
-              {/* <span>•</span>
-              <span>
-                Features: PSI, HHI, Cliffs, Whales, Flips, Forecast, Export
-              </span> */}
             </div>
           </div>
         </footer>

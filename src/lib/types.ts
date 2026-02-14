@@ -64,7 +64,6 @@ export interface FlipOrderMetrics {
   flipDensityNearPeg: number; // Density within ±50 ticks
   flipBidRatio: number; // % of flips on bid side
   flipAskRatio: number; // % of flips on ask side
-  avgFlipSpreadCapture: number; // Average spread captured by flip orders
 }
 
 /** Stability forecast */

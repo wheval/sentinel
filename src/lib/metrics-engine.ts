@@ -21,27 +21,35 @@ import { spreadPercent, normalize, formatPrice, formatLiquidity } from "./tempo-
 // PSI — Peg Stress Index
 // ---------------------------------------------------------------------------
 
-let previousPSI = 25; // Track for trend
+// Track previous PSI per pair to avoid cross-pair trend contamination
+const previousPSIByPair = new Map<string, number>();
 
-export function calculatePSI(orderbook: OrderbookSnapshot): PSIResult {
-  const { spreadStress, liquidityThinness, orderImbalance } = calculatePSIComponents(orderbook);
+export function calculatePSI(
+  orderbook: OrderbookSnapshot,
+  pairId: string = "default"
+): PSIResult {
+  const { spreadStress, liquidityThinness, orderImbalance } =
+    calculatePSIComponents(orderbook);
 
   // PSI = Spread% × 30% + Liquidity Thinness × 40% + Order Imbalance × 30%
   const value = Math.round(
-    spreadStress * 0.3 +
-    liquidityThinness * 0.4 +
-    orderImbalance * 0.3
+    spreadStress * 0.3 + liquidityThinness * 0.4 + orderImbalance * 0.3
   );
 
   const clampedValue = Math.max(0, Math.min(100, value));
+  const prevValue = previousPSIByPair.get(pairId) ?? clampedValue;
 
   const level: PSIResult["level"] =
-    clampedValue <= 30 ? "stable" : clampedValue <= 60 ? "moderate" : "critical";
+    clampedValue <= 30
+      ? "stable"
+      : clampedValue <= 60
+      ? "moderate"
+      : "critical";
 
   const trend: PSIResult["trend"] =
-    clampedValue < previousPSI - 3
+    clampedValue < prevValue - 3
       ? "improving"
-      : clampedValue > previousPSI + 3
+      : clampedValue > prevValue + 3
       ? "worsening"
       : "stable";
 
@@ -50,10 +58,10 @@ export function calculatePSI(orderbook: OrderbookSnapshot): PSIResult {
     level,
     components: { spreadStress, liquidityThinness, orderImbalance },
     trend,
-    previousValue: previousPSI,
+    previousValue: prevValue,
   };
 
-  previousPSI = clampedValue;
+  previousPSIByPair.set(pairId, clampedValue);
   return result;
 }
 
@@ -208,11 +216,13 @@ export function analyzeFlipOrders(orderbook: OrderbookSnapshot): FlipOrderMetric
 
   return {
     totalFlipOrders,
-    flipPercentage: totalOrders > 0 ? (totalFlipOrders / totalOrders) * 100 : 0,
+    flipPercentage:
+      totalOrders > 0 ? (totalFlipOrders / totalOrders) * 100 : 0,
     flipDensityNearPeg: flipDensityNearPeg * 100,
-    flipBidRatio: totalFlipCount > 0 ? (flipBids.length / totalFlipCount) * 100 : 50,
-    flipAskRatio: totalFlipCount > 0 ? (flipAsks.length / totalFlipCount) * 100 : 50,
-    avgFlipSpreadCapture: 0.015, // Basis points, would be calculated from real trade data
+    flipBidRatio:
+      totalFlipCount > 0 ? (flipBids.length / totalFlipCount) * 100 : 50,
+    flipAskRatio:
+      totalFlipCount > 0 ? (flipAsks.length / totalFlipCount) * 100 : 50,
   };
 }
 

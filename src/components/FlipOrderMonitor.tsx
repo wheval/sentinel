@@ -67,13 +67,11 @@ export function FlipOrderMonitor({ metrics }: FlipOrderMonitorProps) {
         </div>
       </div>
 
-      {/* Spread capture */}
+      {/* Flip summary */}
       <div className="bg-[#161b22] rounded-lg p-3 border border-[#1e2733]">
-        <div className="flex justify-between items-center">
-          <span className="text-xs text-[#8b949e]">Avg Spread Capture</span>
-          <span className="text-sm font-mono text-[#3fb950]">
-            {metrics.avgFlipSpreadCapture.toFixed(3)} bps
-          </span>
+        <div className="text-xs text-[#8b949e]">
+          Flip orders auto-reverse when filled, providing perpetual two-sided
+          liquidity near peg. High flip density = strong market-making activity.
         </div>
       </div>
     </div>
