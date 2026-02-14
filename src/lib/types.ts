@@ -90,6 +90,35 @@ export interface SentinelAlert {
   data?: Record<string, unknown>;
 }
 
+/** Liquidity concentration risk (HHI-based) */
+export interface ConcentrationRisk {
+  hhi: number; // Herfindahl–Hirschman Index (0–10000)
+  level: "low" | "moderate" | "high";
+  topTickShare: number; // % of liquidity in the single largest tick
+  top5TickShare: number; // % of liquidity in the top 5 ticks
+  bidConcentration: number; // HHI for bid side only
+  askConcentration: number; // HHI for ask side only
+}
+
+/** Custom alert threshold settings */
+export interface AlertThresholds {
+  psiWarning: number;
+  psiCritical: number;
+  spreadWarning: number;
+  spreadCritical: number;
+  cliffDropPercent: number;
+  whalePercent: number;
+}
+
+export const DEFAULT_THRESHOLDS: AlertThresholds = {
+  psiWarning: 30,
+  psiCritical: 60,
+  spreadWarning: 0.3,
+  spreadCritical: 0.5,
+  cliffDropPercent: 60,
+  whalePercent: 5,
+};
+
 /** Top-level dashboard state */
 export interface DashboardState {
   orderbook: OrderbookSnapshot;
@@ -99,6 +128,7 @@ export interface DashboardState {
   flipMetrics: FlipOrderMetrics;
   forecast: StabilityForecast;
   alerts: SentinelAlert[];
+  concentration: ConcentrationRisk;
   spread: {
     absolute: number;
     percentage: number;

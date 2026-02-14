@@ -1,7 +1,12 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
-import { DashboardState, OrderbookSnapshot } from "@/lib/types";
+import {
+  DashboardState,
+  OrderbookSnapshot,
+  AlertThresholds,
+  DEFAULT_THRESHOLDS,
+} from "@/lib/types";
 import {
   generateOrderbookSnapshot,
   generateHistoricalPSI,
@@ -14,94 +19,179 @@ import {
   analyzeFlipOrders,
   calculateStabilityForecast,
   generateAlerts,
+  calculateConcentrationRisk,
+  generateReport,
 } from "@/lib/metrics-engine";
 import { spreadPercent, pegDeviation } from "@/lib/tempo-math";
+import { appendMetrics, getRecentHistory, type HistoryPoint } from "@/lib/history";
+import { KNOWN_PAIRS, type TempoPair } from "@/lib/tempo-client";
 
-const REFRESH_INTERVAL = 3000; // 3 seconds
+const REFRESH_INTERVAL = 3000;
 
 type DataSource = "live" | "mock";
 
 export function useSentinel() {
   const [dashboard, setDashboard] = useState<DashboardState | null>(null);
-  const [historicalPSI, setHistoricalPSI] = useState<{ time: number; value: number }[]>([]);
-  const [historicalSpread, setHistoricalSpread] = useState<{ time: number; value: number }[]>([]);
+  const [historicalPSI, setHistoricalPSI] = useState<HistoryPoint[]>([]);
+  const [historicalSpread, setHistoricalSpread] = useState<HistoryPoint[]>([]);
   const [isLive, setIsLive] = useState(true);
   const [dataSource, setDataSource] = useState<DataSource>("live");
-  const [connectionStatus, setConnectionStatus] = useState<"connecting" | "connected" | "fallback">("connecting");
+  const [connectionStatus, setConnectionStatus] = useState<
+    "connecting" | "connected" | "fallback"
+  >("connecting");
+  const [selectedPair, setSelectedPair] = useState<TempoPair>(KNOWN_PAIRS[0]);
+  const [thresholds, setThresholds] = useState<AlertThresholds>(DEFAULT_THRESHOLDS);
   const failCountRef = useRef(0);
 
-  // Fetch live data from API route
-  const fetchLiveData = useCallback(async (): Promise<OrderbookSnapshot | null> => {
-    try {
-      const res = await fetch("/api/orderbook");
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const json = await res.json();
-      if (json.source === "error") throw new Error(json.message);
-      failCountRef.current = 0;
-      setConnectionStatus("connected");
-      return json.data as OrderbookSnapshot;
-    } catch {
-      failCountRef.current++;
-      // Fall back to mock after 3 consecutive failures
-      if (failCountRef.current >= 3) {
-        setDataSource("mock");
-        setConnectionStatus("fallback");
+  // Load thresholds from localStorage
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const saved = localStorage.getItem("sentinel_thresholds");
+    if (saved) {
+      try {
+        setThresholds({ ...DEFAULT_THRESHOLDS, ...JSON.parse(saved) });
+      } catch {
+        /* ignore */
       }
-      return null;
     }
   }, []);
 
-  // Process an orderbook snapshot through the metrics engine
-  const processSnapshot = useCallback((orderbook: OrderbookSnapshot) => {
-    const psi = calculatePSI(orderbook);
-    const cliffs = detectLiquidityCliffs(orderbook);
-    const whaleWalls = detectWhaleWalls(orderbook);
-    const flipMetrics = analyzeFlipOrders(orderbook);
-    const forecast = calculateStabilityForecast(psi, orderbook, cliffs);
-    const alerts = generateAlerts(psi, cliffs, whaleWalls, orderbook);
-
-    const spread = spreadPercent(orderbook.bestBid.price, orderbook.bestAsk.price);
-    const deviation = pegDeviation(orderbook.midPrice);
-
-    const totalBid = orderbook.bids.reduce((s, l) => s + l.liquidity, 0);
-    const totalAsk = orderbook.asks.reduce((s, l) => s + l.liquidity, 0);
-    const nearPeg = [...orderbook.bids, ...orderbook.asks]
-      .filter((l) => Math.abs(l.tick) <= 50)
-      .reduce((s, l) => s + l.liquidity, 0);
-
-    setDashboard({
-      orderbook,
-      psi,
-      cliffs,
-      whaleWalls,
-      flipMetrics,
-      forecast,
-      alerts,
-      spread: {
-        absolute: orderbook.bestAsk.price - orderbook.bestBid.price,
-        percentage: spread,
-      },
-      pegDeviation: deviation,
-      liquidityDepth: {
-        totalBid,
-        totalAsk,
-        ratio: totalAsk > 0 ? totalBid / totalAsk : 1,
-        nearPeg,
-      },
-    });
-
-    // Append to historical
-    setHistoricalPSI((prev) => {
-      const next = [...prev, { time: Date.now(), value: psi.value }];
-      return next.slice(-120);
-    });
-    setHistoricalSpread((prev) => {
-      const next = [...prev, { time: Date.now(), value: spread }];
-      return next.slice(-120);
-    });
+  // Save thresholds
+  const updateThresholds = useCallback((t: AlertThresholds) => {
+    setThresholds(t);
+    if (typeof window !== "undefined") {
+      localStorage.setItem("sentinel_thresholds", JSON.stringify(t));
+    }
   }, []);
 
-  // Main refresh function
+  // Load historical data from localStorage on pair change
+  useEffect(() => {
+    const psiHistory = getRecentHistory(selectedPair.id, "psi", 60);
+    const spreadHistory = getRecentHistory(selectedPair.id, "spread", 60);
+    setHistoricalPSI(psiHistory);
+    setHistoricalSpread(spreadHistory);
+
+    // If no history, seed with mock for visual
+    if (psiHistory.length === 0) {
+      const mock = generateHistoricalPSI(30);
+      setHistoricalPSI(mock.map((m) => ({ t: m.time, v: m.value })));
+    }
+    if (spreadHistory.length === 0) {
+      const mock = generateHistoricalSpread(30);
+      setHistoricalSpread(mock.map((m) => ({ t: m.time, v: m.value })));
+    }
+  }, [selectedPair]);
+
+  // Fetch live data
+  const fetchLiveData = useCallback(
+    async (): Promise<OrderbookSnapshot | null> => {
+      try {
+        const res = await fetch(
+          `/api/orderbook?pair=${selectedPair.id}`
+        );
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const json = await res.json();
+        if (json.source === "error") throw new Error(json.message);
+        failCountRef.current = 0;
+        setConnectionStatus("connected");
+        return json.data as OrderbookSnapshot;
+      } catch {
+        failCountRef.current++;
+        if (failCountRef.current >= 3) {
+          setDataSource("mock");
+          setConnectionStatus("fallback");
+        }
+        return null;
+      }
+    },
+    [selectedPair]
+  );
+
+  // Process a snapshot
+  const processSnapshot = useCallback(
+    (orderbook: OrderbookSnapshot) => {
+      const psi = calculatePSI(orderbook);
+      const cliffs = detectLiquidityCliffs(
+        orderbook,
+        thresholds.cliffDropPercent / 100
+      );
+      const whaleWalls = detectWhaleWalls(
+        orderbook,
+        thresholds.whalePercent / 100
+      );
+      const flipMetrics = analyzeFlipOrders(orderbook);
+      const forecast = calculateStabilityForecast(psi, orderbook, cliffs);
+      const concentration = calculateConcentrationRisk(orderbook);
+      const alerts = generateAlerts(
+        psi,
+        cliffs,
+        whaleWalls,
+        orderbook,
+        thresholds
+      );
+
+      const spread = spreadPercent(
+        orderbook.bestBid.price,
+        orderbook.bestAsk.price
+      );
+      const deviation = pegDeviation(orderbook.midPrice);
+
+      const totalBid = orderbook.bids.reduce((s, l) => s + l.liquidity, 0);
+      const totalAsk = orderbook.asks.reduce((s, l) => s + l.liquidity, 0);
+      const nearPeg = [...orderbook.bids, ...orderbook.asks]
+        .filter((l) => Math.abs(l.tick) <= 50)
+        .reduce((s, l) => s + l.liquidity, 0);
+
+      const newDashboard: DashboardState = {
+        orderbook,
+        psi,
+        cliffs,
+        whaleWalls,
+        flipMetrics,
+        forecast,
+        alerts,
+        concentration,
+        spread: {
+          absolute: orderbook.bestAsk.price - orderbook.bestBid.price,
+          percentage: spread,
+        },
+        pegDeviation: deviation,
+        liquidityDepth: {
+          totalBid,
+          totalAsk,
+          ratio: totalAsk > 0 ? totalBid / totalAsk : 1,
+          nearPeg,
+        },
+      };
+
+      setDashboard(newDashboard);
+
+      // Persist to localStorage
+      appendMetrics(selectedPair.id, {
+        psi: psi.value,
+        spread,
+        bidDepth: totalBid,
+        askDepth: totalAsk,
+        imbalance: totalBid / (totalBid + totalAsk) * 100,
+        nearPegLiq: nearPeg,
+        pegDev: deviation.percentage,
+      });
+
+      // Update in-memory historical arrays
+      const now = Date.now();
+      setHistoricalPSI((prev) => {
+        const next = [...prev, { t: now, v: psi.value }];
+        return next.slice(-720);
+      });
+      setHistoricalSpread((prev) => {
+        const next = [...prev, { t: now, v: spread }];
+        return next.slice(-720);
+      });
+    },
+    [selectedPair, thresholds]
+  );
+
+  // Main refresh
   const refresh = useCallback(async () => {
     if (dataSource === "live") {
       const liveData = await fetchLiveData();
@@ -110,15 +200,12 @@ export function useSentinel() {
         return;
       }
     }
-    // Fallback to mock
     const mockData = generateOrderbookSnapshot();
     processSnapshot(mockData);
   }, [dataSource, fetchLiveData, processSnapshot]);
 
   // Initialize
   useEffect(() => {
-    setHistoricalPSI(generateHistoricalPSI(60));
-    setHistoricalSpread(generateHistoricalSpread(60));
     refresh();
   }, [refresh]);
 
@@ -143,6 +230,21 @@ export function useSentinel() {
     });
   }, []);
 
+  // Export report
+  const exportReport = useCallback(() => {
+    if (!dashboard) return;
+    const report = generateReport(dashboard, selectedPair.label);
+    const blob = new Blob([JSON.stringify(report, null, 2)], {
+      type: "application/json",
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `sentinel-report-${selectedPair.id}-${new Date().toISOString().slice(0, 19)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [dashboard, selectedPair]);
+
   return {
     dashboard,
     historicalPSI,
@@ -153,5 +255,11 @@ export function useSentinel() {
     dataSource,
     connectionStatus,
     toggleDataSource,
+    selectedPair,
+    setSelectedPair,
+    pairs: KNOWN_PAIRS,
+    thresholds,
+    updateThresholds,
+    exportReport,
   };
 }

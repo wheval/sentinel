@@ -2,10 +2,11 @@
 // Tempo Sentinel — Live Tempo Chain Client
 // ============================================================================
 // Connects to Tempo Moderato testnet via viem/tempo SDK.
+// Supports multi-pair orderbook scanning.
 
 import { createClient, http, publicActions, type Address } from "viem";
 import { tempoModerato } from "viem/chains";
-import { tempoActions, Addresses, Abis, Tick } from "viem/tempo";
+import { tempoActions, Addresses, Abis } from "viem/tempo";
 import type { OrderbookSnapshot, OrderbookLevel } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -34,29 +35,65 @@ const client = createClient({
   .extend(tempoActions());
 
 // ---------------------------------------------------------------------------
+// Known pairs on Tempo Moderato
+// ---------------------------------------------------------------------------
+
+export interface TempoPair {
+  id: string;
+  base: Address;
+  quote: Address;
+  baseSymbol: string;
+  quoteSymbol: string;
+  label: string;
+}
+
+export const KNOWN_PAIRS: TempoPair[] = [
+  {
+    id: "alpha-pathusd",
+    base: "0x20c0000000000000000000000000000000000001" as Address,
+    quote: Addresses.pathUsd as Address,
+    baseSymbol: "AlphaUSD",
+    quoteSymbol: "pathUSD",
+    label: "AlphaUSD / pathUSD",
+  },
+  {
+    id: "beta-pathusd",
+    base: "0x20c0000000000000000000000000000000000002" as Address,
+    quote: Addresses.pathUsd as Address,
+    baseSymbol: "BetaUSD",
+    quoteSymbol: "pathUSD",
+    label: "BetaUSD / pathUSD",
+  },
+  {
+    id: "theta-pathusd",
+    base: "0x20c0000000000000000000000000000000000003" as Address,
+    quote: Addresses.pathUsd as Address,
+    baseSymbol: "ThetaUSD",
+    quoteSymbol: "pathUSD",
+    label: "ThetaUSD / pathUSD",
+  },
+];
+
+// ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
 const DEX_ADDRESS = Addresses.stablecoinDex as `0x${string}`;
 const DEX_ABI = Abis.stablecoinDex;
-
-// AlphaUSD is the main stablecoin on Tempo testnet
-const ALPHA_USD = "0x20c0000000000000000000000000000000000001" as Address;
-const PATH_USD = Addresses.pathUsd;
-
 const PRICE_SCALE = 100_000;
 const TICK_SPACING = 10;
 const SCAN_MIN_TICK = -500;
 const SCAN_MAX_TICK = 500;
 
-// How many orders to sample per tick for flip detection
-const FLIP_SAMPLE_SIZE = 10;
-
 // ---------------------------------------------------------------------------
 // Fetch full orderbook via multicall
 // ---------------------------------------------------------------------------
 
-export async function fetchLiveOrderbook(): Promise<OrderbookSnapshot> {
+export async function fetchLiveOrderbook(
+  baseToken?: Address
+): Promise<OrderbookSnapshot> {
+  const base = baseToken || KNOWN_PAIRS[0].base;
+
   // 1. Build tick range
   const ticks: number[] = [];
   for (let t = SCAN_MIN_TICK; t <= SCAN_MAX_TICK; t += TICK_SPACING) {
@@ -69,13 +106,13 @@ export async function fetchLiveOrderbook(): Promise<OrderbookSnapshot> {
       address: DEX_ADDRESS,
       abi: DEX_ABI,
       functionName: "getTickLevel" as const,
-      args: [ALPHA_USD, tick, true] as const, // bid
+      args: [base, tick, true] as const,
     },
     {
       address: DEX_ADDRESS,
       abi: DEX_ABI,
       functionName: "getTickLevel" as const,
-      args: [ALPHA_USD, tick, false] as const, // ask
+      args: [base, tick, false] as const,
     },
   ]);
 
@@ -84,9 +121,8 @@ export async function fetchLiveOrderbook(): Promise<OrderbookSnapshot> {
   // 3. Parse results into OrderbookLevel arrays
   const bids: OrderbookLevel[] = [];
   const asks: OrderbookLevel[] = [];
-
-  // Collect ticks that need flip sampling
-  const ticksToSampleFlip: { tick: number; isBid: boolean; head: bigint }[] = [];
+  const ticksToSampleFlip: { tick: number; isBid: boolean; head: bigint }[] =
+    [];
 
   for (let i = 0; i < ticks.length; i++) {
     const tick = ticks[i];
@@ -94,15 +130,19 @@ export async function fetchLiveOrderbook(): Promise<OrderbookSnapshot> {
     const askResult = results[i * 2 + 1];
 
     if (bidResult.status === "success") {
-      const [head, tail, totalLiquidity] = bidResult.result as [bigint, bigint, bigint];
+      const [head, tail, totalLiquidity] = bidResult.result as [
+        bigint,
+        bigint,
+        bigint,
+      ];
       if (totalLiquidity > 0n) {
-        const liqUsd = Number(totalLiquidity) / 1e6; // TIP-20 uses 6 decimals
+        const liqUsd = Number(totalLiquidity) / 1e6;
         bids.push({
           tick,
           price: tickToPrice(tick),
           liquidity: liqUsd,
           side: "bid",
-          isFlipOrder: false, // Will be updated by flip sampling
+          isFlipOrder: false,
           orderCount: estimateOrderCount(head, tail),
         });
         if (head > 0n) {
@@ -112,7 +152,11 @@ export async function fetchLiveOrderbook(): Promise<OrderbookSnapshot> {
     }
 
     if (askResult.status === "success") {
-      const [head, tail, totalLiquidity] = askResult.result as [bigint, bigint, bigint];
+      const [head, tail, totalLiquidity] = askResult.result as [
+        bigint,
+        bigint,
+        bigint,
+      ];
       if (totalLiquidity > 0n) {
         const liqUsd = Number(totalLiquidity) / 1e6;
         asks.push({
@@ -130,7 +174,7 @@ export async function fetchLiveOrderbook(): Promise<OrderbookSnapshot> {
     }
   }
 
-  // 4. Sample flip orders (sample head order from a subset of ticks)
+  // 4. Sample flip orders
   await sampleFlipOrders(ticksToSampleFlip, bids, asks);
 
   // 5. Sort
@@ -161,10 +205,8 @@ async function sampleFlipOrders(
   bids: OrderbookLevel[],
   asks: OrderbookLevel[]
 ) {
-  // Sample a subset of ticks to avoid too many RPC calls
-  const sampled = ticksToSample.slice(0, 30); // Max 30 ticks to sample
+  const sampled = ticksToSample.slice(0, 30);
 
-  // Multicall getOrder for head of each sampled tick
   const orderCalls = sampled.map((t) => ({
     address: DEX_ADDRESS,
     abi: DEX_ABI,
@@ -209,9 +251,7 @@ function tickToPrice(tick: number): number {
 function estimateOrderCount(head: bigint, tail: bigint): number {
   if (head === 0n) return 0;
   if (head === tail) return 1;
-  // Orders are monotonically increasing IDs, so rough estimate
   const diff = Number(tail - head);
-  // IDs aren't contiguous (gaps from cancelled orders), so heuristic
   return Math.max(1, Math.min(diff, 100));
 }
 
@@ -224,26 +264,4 @@ function createEmptyLevel(side: "bid" | "ask", tick: number): OrderbookLevel {
     isFlipOrder: false,
     orderCount: 0,
   };
-}
-
-// ---------------------------------------------------------------------------
-// Get books metadata (best bid/ask ticks)
-// ---------------------------------------------------------------------------
-
-export async function fetchBooksMeta() {
-  const pairKey = await client.readContract({
-    address: DEX_ADDRESS,
-    abi: DEX_ABI,
-    functionName: "pairKey",
-    args: [ALPHA_USD, PATH_USD],
-  });
-
-  const books = await client.readContract({
-    address: DEX_ADDRESS,
-    abi: DEX_ABI,
-    functionName: "books",
-    args: [pairKey as `0x${string}`],
-  });
-
-  return books;
 }

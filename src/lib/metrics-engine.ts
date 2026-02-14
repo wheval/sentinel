@@ -11,6 +11,9 @@ import {
   FlipOrderMetrics,
   StabilityForecast,
   SentinelAlert,
+  ConcentrationRisk,
+  AlertThresholds,
+  DEFAULT_THRESHOLDS,
 } from "./types";
 import { spreadPercent, normalize, formatPrice, formatLiquidity } from "./tempo-math";
 
@@ -272,7 +275,63 @@ export function calculateStabilityForecast(
 }
 
 // ---------------------------------------------------------------------------
-// Alert Generation
+// Concentration Risk (HHI — Herfindahl-Hirschman Index)
+// ---------------------------------------------------------------------------
+
+export function calculateConcentrationRisk(
+  orderbook: OrderbookSnapshot
+): ConcentrationRisk {
+  const allLevels = [...orderbook.bids, ...orderbook.asks];
+  const totalLiq = allLevels.reduce((s, l) => s + l.liquidity, 0);
+
+  if (totalLiq === 0) {
+    return {
+      hhi: 0,
+      level: "low",
+      topTickShare: 0,
+      top5TickShare: 0,
+      bidConcentration: 0,
+      askConcentration: 0,
+    };
+  }
+
+  // HHI = sum of (market share %)^2 for each tick
+  const shares = allLevels.map((l) => (l.liquidity / totalLiq) * 100);
+  const hhi = Math.round(shares.reduce((s, sh) => s + sh * sh, 0));
+
+  // Top tick share
+  const sorted = [...allLevels].sort((a, b) => b.liquidity - a.liquidity);
+  const topTickShare = (sorted[0]?.liquidity || 0) / totalLiq * 100;
+  const top5TickShare =
+    sorted.slice(0, 5).reduce((s, l) => s + l.liquidity, 0) / totalLiq * 100;
+
+  // Per-side HHI
+  const calcSideHHI = (levels: typeof orderbook.bids) => {
+    const total = levels.reduce((s, l) => s + l.liquidity, 0);
+    if (total === 0) return 0;
+    return Math.round(
+      levels.reduce((s, l) => {
+        const share = (l.liquidity / total) * 100;
+        return s + share * share;
+      }, 0)
+    );
+  };
+
+  const level: ConcentrationRisk["level"] =
+    hhi < 1500 ? "low" : hhi < 2500 ? "moderate" : "high";
+
+  return {
+    hhi,
+    level,
+    topTickShare: Math.round(topTickShare * 10) / 10,
+    top5TickShare: Math.round(top5TickShare * 10) / 10,
+    bidConcentration: calcSideHHI(orderbook.bids),
+    askConcentration: calcSideHHI(orderbook.asks),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Alert Generation (with configurable thresholds)
 // ---------------------------------------------------------------------------
 
 let alertCounter = 0;
@@ -281,29 +340,30 @@ export function generateAlerts(
   psi: PSIResult,
   cliffs: LiquidityCliff[],
   whaleWalls: WhaleWall[],
-  orderbook: OrderbookSnapshot
+  orderbook: OrderbookSnapshot,
+  thresholds: AlertThresholds = DEFAULT_THRESHOLDS
 ): SentinelAlert[] {
   const alerts: SentinelAlert[] = [];
   const now = Date.now();
 
-  // PSI critical alert
-  if (psi.value > 60) {
+  // PSI alerts
+  if (psi.value > thresholds.psiCritical) {
     alerts.push({
       id: `alert-${++alertCounter}`,
       timestamp: now,
       type: "psi_critical",
       severity: "critical",
       title: "Peg Stress Index Critical",
-      message: `PSI at ${psi.value}/100. Elevated peg risk detected across multiple indicators.`,
+      message: `PSI at ${psi.value}/100 (threshold: ${thresholds.psiCritical}). Elevated peg risk detected across multiple indicators.`,
     });
-  } else if (psi.value > 30) {
+  } else if (psi.value > thresholds.psiWarning) {
     alerts.push({
       id: `alert-${++alertCounter}`,
       timestamp: now,
       type: "psi_critical",
       severity: "warning",
       title: "Peg Stress Elevated",
-      message: `PSI at ${psi.value}/100. Monitoring recommended.`,
+      message: `PSI at ${psi.value}/100 (threshold: ${thresholds.psiWarning}). Monitoring recommended.`,
     });
   }
 
@@ -335,12 +395,12 @@ export function generateAlerts(
 
   // Spread warning
   const spread = spreadPercent(orderbook.bestBid.price, orderbook.bestAsk.price);
-  if (spread > 0.3) {
+  if (spread > thresholds.spreadWarning) {
     alerts.push({
       id: `alert-${++alertCounter}`,
       timestamp: now,
       type: "spread_warning",
-      severity: spread > 0.5 ? "critical" : "warning",
+      severity: spread > thresholds.spreadCritical ? "critical" : "warning",
       title: "Spread Widening",
       message: `Current spread at ${spread.toFixed(3)}%. Market efficiency degrading.`,
     });
@@ -361,4 +421,51 @@ export function generateAlerts(
   }
 
   return alerts;
+}
+
+// ---------------------------------------------------------------------------
+// Export snapshot as JSON report
+// ---------------------------------------------------------------------------
+
+export function generateReport(
+  dashboard: {
+    psi: PSIResult;
+    cliffs: LiquidityCliff[];
+    whaleWalls: WhaleWall[];
+    flipMetrics: FlipOrderMetrics;
+    forecast: StabilityForecast;
+    concentration: ConcentrationRisk;
+    spread: { absolute: number; percentage: number };
+    pegDeviation: { absolute: number; percentage: number; direction: string };
+    liquidityDepth: { totalBid: number; totalAsk: number; ratio: number; nearPeg: number };
+    alerts: SentinelAlert[];
+  },
+  pairLabel: string
+): object {
+  return {
+    report: "Tempo Sentinel — Peg Stability Report",
+    generatedAt: new Date().toISOString(),
+    pair: pairLabel,
+    summary: {
+      pegStressIndex: dashboard.psi.value,
+      pegStressLevel: dashboard.psi.level,
+      stabilityForecast: dashboard.forecast.probability,
+      spreadPercent: dashboard.spread.percentage,
+      pegDeviation: dashboard.pegDeviation,
+      concentrationRisk: dashboard.concentration.level,
+    },
+    metrics: {
+      psi: dashboard.psi,
+      concentration: dashboard.concentration,
+      liquidityDepth: dashboard.liquidityDepth,
+      spread: dashboard.spread,
+      flipOrders: dashboard.flipMetrics,
+      forecast: dashboard.forecast,
+    },
+    detections: {
+      whaleWalls: dashboard.whaleWalls,
+      liquidityCliffs: dashboard.cliffs,
+    },
+    alerts: dashboard.alerts,
+  };
 }
